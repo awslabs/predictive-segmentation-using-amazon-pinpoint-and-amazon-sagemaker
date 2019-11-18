@@ -1,0 +1,18 @@
+{
+    "name": "11-import-segment-status-lambda",
+    "version": "1.0.0",
+    "description": "",
+    "main": "index.js",
+    "scripts": {
+        "pretest": "npm install",
+        "build:init": "rm -rf package-lock.json && rm -rf dist && rm -rf node_modules",
+        "build:zip": "rm -rf package-lock.json && zip -rq --exclude=*tests* --exclude=*template.yml 11-import-segment-status-lambda.zip .",
+        "build:dist": "mkdir dist && mv 11-import-segment-status-lambda.zip dist/",
+        "build": "npm run build:init && npm install --production && npm run build:zip && npm run build:dist",
+        "coverage": "nyc npm test"
+    },
+    "author": {
+        "name": "Ryan Lowe"
+    },
+    "license": "Apache 2.0"
+}

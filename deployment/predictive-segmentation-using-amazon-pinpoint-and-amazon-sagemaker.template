@@ -1,0 +1,1653 @@
+# Predictive Segmentation using Amazon Pinpoint and Amazon SageMaker
+#
+# template for predictive-segmentation-using-amazon-pinpoint-and-amazon-sagemaker
+# **DO NOT DELETE**
+#
+# author: rjlowe@
+AWSTemplateFormatVersion: 2010-09-09
+Description: (SO0079) - Predictive Segmentation using Amazon Pinpoint and Amazon SageMaker solution - Daily update of an Amazon Pinpoint segment with users identified by Amazon SageMaker machine learning models
+
+Parameters:
+  ApplicationId:
+    Type: String
+    Description: Application ID from Amazon Pinpoint
+  SageMakerModelName:
+    Type: String
+    Default: deployed-xgboost-customer-churn
+    Description: Model name and training job name.
+  SageMakerModelTrainInstanceType:
+    Type: String
+    Default: ml.m4.xlarge
+    Description: GPU Instance type for model training job.
+  SageMakerTransformInstanceType:
+    Type: String
+    Default: ml.m5.large
+    Description: GPU Instance type for daily bulk transform jobs.
+  ChurnPredictionThreashold:
+    Type: Number
+    Default: 0.40
+    Description: Predictive Churn Threshold to filter
+
+Mappings:
+  SourceCode:
+    General:
+      S3Bucket: "%%BUCKET_NAME%%"
+      KeyPrefix: "%%SOLUTION_NAME%%/%%VERSION%%"
+
+Resources:
+  DataS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LogBucket
+        LogFilePrefix: predictive-segmentation-data/
+
+  NotebookS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LogBucket
+        LogFilePrefix: notebook-data-bucket/
+
+  LogBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: This is the log bucket.
+    Properties:
+      AccessControl: LogDeliveryWrite
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+  LogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Sid: AWSCloudTrailAclCheck
+          Effect: Allow
+          Principal:
+            Service: cloudtrail.amazonaws.com
+          Action: "s3:GetBucketAcl"
+          Resource: !Sub arn:aws:s3:::${LogBucket}
+        - Sid: AWSCloudTrailWrite
+          Effect: Allow
+          Principal:
+            Service: cloudtrail.amazonaws.com
+          Action: "s3:PutObject"
+          Resource: !Sub arn:aws:s3:::${LogBucket}/AWSLogs/${AWS::AccountId}/*
+          Condition:
+            StringEquals:
+              "s3:x-amz-acl": "bucket-owner-full-control"
+
+  BasicNotebookInstance:
+    Type: 'AWS::SageMaker::NotebookInstance'
+    Properties:
+      InstanceType: ml.t2.medium
+      NotebookInstanceName: PredictiveChurnNotebookInstance
+      RoleArn: !GetAtt
+        - NotebookInstanceExecutionRole
+        - Arn
+      LifecycleConfigName: !GetAtt
+        - BasicNotebookInstanceLifecycleConfig
+        - NotebookInstanceLifecycleConfigName
+  BasicNotebookInstanceLifecycleConfig:
+    Type: 'AWS::SageMaker::NotebookInstanceLifecycleConfig'
+    Properties:
+      OnStart:
+        - Content: !Base64
+            'Fn::Join':
+              - ;
+              - - cd /home/ec2-user/SageMaker
+                - !Sub 'aws s3 cp s3://%%BUCKET_NAME%%-${AWS::Region}/%%SOLUTION_NAME%%/%%VERSION%%/xgboost_customer_churn.ipynb .'
+                - !Sub 'aws s3 cp s3://%%BUCKET_NAME%%-${AWS::Region}/%%SOLUTION_NAME%%/%%VERSION%%/ChurnSampleData.csv .'
+                - !Join
+                  - ''
+                  - - sed -i 's/S3BucketName/
+                    - !Ref NotebookS3Bucket
+                    - /g' xgboost_customer_churn.ipynb
+                - sed -i 's/S3Prefix/pred-maintenance-artifacts/g' xgboost_customer_churn.ipynb
+                - !Join
+                  - ''
+                  - - sed -i 's/deployed-xgboost-customer-churn/
+                    - !Ref SageMakerModelName
+                    - /g' xgboost_customer_churn.ipynb
+                - !Join
+                  - ''
+                  - - sed -i 's/ml.m4.xlarge/
+                    - !Ref SageMakerModelTrainInstanceType
+                    - /g' xgboost_customer_churn.ipynb
+
+
+  NotebookInstanceExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - sagemaker.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+
+  NotebookInstanceIAMPolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: sm-notebook-instance-policy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 's3:CreateBucket'
+              - 's3:GetBucketLocation'
+              - 's3:ListBucket'
+              - 's3:GetObject'
+              - 's3:PutObject'
+              - 's3:DeleteObject'
+            Resource:
+              - "arn:aws:s3:::%%BUCKET_NAME%%"
+              - "arn:aws:s3:::%%BUCKET_NAME%%*"
+              - !GetAtt NotebookS3Bucket.Arn
+              - !Join
+                    - ""
+                    - - !GetAtt NotebookS3Bucket.Arn
+                      - "*"
+              - !Sub "arn:aws:s3:::${DataS3Bucket}*"
+              - !Sub "arn:aws:s3:::${DataS3Bucket}"
+          - Effect: Allow
+            Action:
+              - 'sagemaker:CreateTrainingJob'
+              - 'sagemaker:DescribeTrainingJob'
+              - 'sagemaker:CreateModel'
+              - 'sagemaker:DescribeModel'
+              - 'sagemaker:DeleteModel'
+              - 'sagemaker:DescribeTransformJob'
+              - 'sagemaker:CreateTransformJob'
+              - 'sagemaker:DescribeNotebookInstance'
+            Resource:
+              - !Join
+                - ''
+                - - 'arn:aws:sagemaker:'
+                  - !Ref 'AWS::Region'
+                  - ':'
+                  - !Ref 'AWS::AccountId'
+                  - ':*'
+          - Effect: Allow
+            Action:
+              - 'ecr:GetAuthorizationToken'
+              - 'ecr:GetDownloadUrlForLayer'
+              - 'ecr:BatchGetImage'
+              - 'ecr:BatchCheckLayerAvailability'
+            Resource:
+              - !Join
+                - ''
+                - - 'arn:aws:ecr:'
+                  - !Ref 'AWS::Region'
+                  - ':'
+                  - !Ref 'AWS::AccountId'
+                  - ':repository/*'
+          - Effect: Allow
+            Action:
+              - 'cloudwatch:PutMetricData'
+              - 'cloudwatch:GetMetricData'
+              - 'cloudwatch:GetMetricStatistics'
+              - 'cloudwatch:ListMetrics'
+            Resource:
+              - !Join
+                - ''
+                - - 'arn:aws:cloudwatch:'
+                  - !Ref 'AWS::Region'
+                  - ':'
+                  - !Ref 'AWS::AccountId'
+                  - ':*'
+          - Effect: Allow
+            Action:
+              - 'logs:CreateLogGroup'
+              - 'logs:CreateLogStream'
+              - 'logs:DescribeLogStreams'
+              - 'logs:GetLogEvents'
+              - 'logs:PutLogEvents'
+            Resource: !Join
+              - ''
+              - - 'arn:aws:logs:'
+                - !Ref 'AWS::Region'
+                - ':'
+                - !Ref 'AWS::AccountId'
+                - ':log-group:/aws/sagemaker/*'
+          - Effect: Allow
+            Action:
+              - 'iam:PassRole'
+            Resource:
+              - !GetAtt
+                - NotebookInstanceExecutionRole
+                - Arn
+            Condition:
+              StringEquals:
+                'iam:PassedToService': sagemaker.amazonaws.com
+          - Effect: Allow
+            Action:
+              - 'iam:GetRole'
+            Resource:
+              - !GetAtt
+                - NotebookInstanceExecutionRole
+                - Arn
+      Roles:
+        - !Ref NotebookInstanceExecutionRole
+
+
+  PinpointKinesisStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      ShardCount: 1
+      Tags:
+        -
+          Key: "Name"
+          Value: "Pinpoint Event Firehose Stream Destination"
+
+
+  PinpointEngagingApplicationStream:
+    Type: AWS::Pinpoint::EventStream
+    Properties:
+      ApplicationId: !Ref ApplicationId
+      DestinationStreamArn: !GetAtt PinpointKinesisStream.Arn
+      RoleArn: !GetAtt PinpointKinesisStreamRole.Arn
+
+  FirehoseRecordConversionLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+        Handler: index.handler
+        Role: !GetAtt FirehoseRecordConversionLambdaRole.Arn
+        Runtime: "nodejs10.x"
+        Timeout: 60
+        Code:
+          S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
+          S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"],  "firehose-record-conversion-lambda.zip"]]
+
+
+
+  PinpointEventFirehose:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamType: "KinesisStreamAsSource"
+      KinesisStreamSourceConfiguration:
+        KinesisStreamARN: !GetAtt PinpointKinesisStream.Arn
+        RoleARN: !GetAtt PinpointKinesisFirehoseRole.Arn
+      ExtendedS3DestinationConfiguration:
+        BucketARN: !Sub "arn:aws:s3:::${DataS3Bucket}"
+        BufferingHints:
+          IntervalInSeconds: 300
+          SizeInMBs: 5
+        CompressionFormat: "UNCOMPRESSED"
+        Prefix: "events/"
+        RoleARN: !GetAtt PinpointKinesisFirehoseRole.Arn
+        ProcessingConfiguration:
+          Enabled: TRUE
+          Processors:
+            -
+              Parameters:
+                -
+                  ParameterName: "LambdaArn"
+                  ParameterValue: !GetAtt FirehoseRecordConversionLambda.Arn
+                -
+                  ParameterName: "BufferIntervalInSeconds"
+                  ParameterValue: 60
+                -
+                  ParameterName: "BufferSizeInMBs"
+                  ParameterValue: 3
+                -
+                  ParameterName: "NumberOfRetries"
+                  ParameterValue: 3
+                -
+                  ParameterName: "RoleArn"
+                  ParameterValue: !GetAtt PinpointKinesisFirehoseRole.Arn
+              Type: "Lambda"
+
+  PinpointEventDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: "pinpoint-events"
+        Description: "Pinpoint Streaming Event Database"
+
+  Crawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Role: !GetAtt CrawlerRole.Arn
+      Description: "Crawler of Pinpoint Events streaming into S3 from Kinesis"
+      Schedule:
+        ScheduleExpression: "cron(0 1 * * ? *)"
+      DatabaseName: !Ref PinpointEventDatabase
+      Targets:
+        S3Targets:
+          -
+            Path: !Sub "s3://${DataS3Bucket}"
+            Exclusions:
+              - 'sagemaker-bulk-transform-result/**'
+              - 'sagemaker-bulk-transform/**'
+      Name: pinpoint-event-crawler
+      Configuration: "{\"Version\":1.0,\"CrawlerOutput\":{\"Partitions\":{\"AddOrUpdateBehavior\":\"InheritFromTable\"},\"Tables\":{\"AddOrUpdateBehavior\":\"MergeNewColumns\"}}}"
+
+
+  AugmentEndpointNamedQuery:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref PinpointEventDatabase
+      Description: "Query to select customers and churn features for SageMaker consumption."
+      QueryString: |
+            WITH dataset AS (
+              SELECT
+                facets.email_channel.mail_event.mail.destination as emailaddresses,
+                event_type,
+                arrival_timestamp
+              FROM "events"
+              WHERE
+                (event_type = '_email.delivered' AND from_unixtime(arrival_timestamp) > date_add('month', -12, date('2019-10-25')))
+                  OR
+                (event_type IN ('_email.open', '_email.click') AND from_unixtime(arrival_timestamp) > date_add('month', -12, date('2019-10-25')))
+                ),
+            delivered AS (
+              SELECT
+                emailaddresses,
+               'DELIVERED' AS event_type,
+                arrival_timestamp
+              FROM dataset
+              WHERE event_type = '_email.delivered'
+            ),
+            engaged AS (
+              SELECT
+                emailaddresses,
+                'ENGAGEMENT' AS event_type,
+                arrival_timestamp
+              FROM dataset
+              WHERE event_type IN ('_email.open', '_email.click')
+            ),
+            joined AS (
+              SELECT
+                emailaddresses,
+                arrival_timestamp AS delivered_timestamp,
+                null AS engagement_timestamp
+              FROM delivered
+              UNION
+              SELECT
+                emailaddresses,
+                null AS delivered_timestamp,
+                arrival_timestamp AS engagement_timestamp
+              FROM engaged
+            ),
+            flatten AS (
+              SELECT emailaddress, delivered_timestamp, engagement_timestamp
+              FROM joined
+              CROSS JOIN UNNEST(emailaddresses) as t(emailaddress)
+            ),
+            min_max AS (
+              SELECT
+                emailaddress,
+                MAX(delivered_timestamp) AS max_delivered_timestamp,
+                MIN(delivered_timestamp) AS min_delivered_timestamp,
+                MAX(engagement_timestamp) AS last_engagement,
+                COUNT(delivered_timestamp) AS num_delivered
+              FROM flatten
+              GROUP BY emailaddress
+            )
+            SELECT
+              MAX(b.EndpointID),
+              a.address AS EmailAddress,
+              MAX(b."account length"),
+              MAX(b."PlanOptionA"),
+              MAX(b."PlanOptionB"),
+              MAX(b."PlanOptionC"),
+              MAX(b."UsageWeekdays"),
+              MAX(b."UsageWeekends"),
+              MAX(b."SharedWithFriend"),
+              MAX(CASE WHEN from_unixtime(c.max_delivered_timestamp) < date_add('month', -6, date('2019-10-25')) THEN 0 WHEN from_unixtime(c.max_delivered_timestamp) < date_add('month', -1, date('2019-10-25')) THEN 1 ELSE 2 END),
+              MAX(CASE WHEN from_unixtime(c.last_engagement) < date_add('month', -6, date('2019-10-25')) THEN 0 WHEN from_unixtime(c.last_engagement) < date_add('month', -1, date('2019-10-25')) THEN 1 ELSE 2 END)
+            FROM endpoint_exports a
+            INNER JOIN customers b
+              ON a.address = b.emailaddress
+            LEFT JOIN min_max c
+              ON a.address = c.emailaddress
+            WHERE a.channeltype = 'EMAIL' AND a.endpointstatus = 'ACTIVE' AND a.optout = 'NONE'
+            GROUP BY a.address
+
+
+  ExportPinpointEndpointsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt ExportPinpointEndpointsLambdaRole.Arn
+      Runtime: "nodejs10.x"
+      Timeout: 60
+      Environment:
+        Variables:
+          PINPOINT_APPLICATION_ID: !Ref ApplicationId
+          S3_BUCKET: !Ref DataS3Bucket
+          ROLE_ARN: !GetAtt PinpointExportRole.Arn
+      Code:
+        S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
+        S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"],  "02-export-pinpoint-endpoints-lambda.zip"]]
+
+
+  ExportStatusLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt ExportStatusLambdaRole.Arn
+      Runtime: "nodejs10.x"
+      Timeout: 60
+      Environment:
+        Variables:
+          PINPOINT_APPLICATION_ID: !Ref ApplicationId
+      Code:
+        S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
+        S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"],  "03-export-status-lambda.zip"]]
+
+
+  QueryAugmentStartLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt QueryAugmentStartLambdaRole.Arn
+      Runtime: "nodejs10.x"
+      Timeout: 60
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref DataS3Bucket
+          NAMED_QUERY: !Ref AugmentEndpointNamedQuery
+      Code:
+        S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
+        S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"],  "04-query-augment-start-lambda.zip"]]
+
+
+  QueryStatusLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt QueryStatusLambdaRole.Arn
+      Runtime: "nodejs10.x"
+      Timeout: 60
+      Code:
+        S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
+        S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"],  "05-query-status-lambda.zip"]]
+
+
+  RemoveHeaderFromQueryCSV:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt RemoveHeaderFromQueryCSVRole.Arn
+      Runtime: "nodejs10.x"
+      Timeout: 60
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref DataS3Bucket
+      Code:
+        S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
+        S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"],  "06-remove-header-from-query-lambda.zip"]]
+
+
+
+  SagemakerBatchTransformLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt SagemakerBatchTransformLambdaRole.Arn
+      Runtime: "nodejs10.x"
+      Timeout: 60
+      Environment:
+        Variables:
+          MODEL_NAME: !Ref SageMakerModelName
+          S3_BUCKET: !Ref DataS3Bucket
+          TRANSFORM_INSTANCE: !Ref SageMakerTransformInstanceType
+      Code:
+        S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
+        S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"],  "07-sagemaker-batch-transform-lambda.zip"]]
+
+
+
+
+  BatchTransformStatusLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt BatchTransformStatusLambdaRole.Arn
+      Runtime: "nodejs10.x"
+      Timeout: 60
+      Code:
+        S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
+        S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"],  "08-batch-transform-status-lambda.zip"]]
+
+
+  AddHeaderRowAndFilterLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt AddHeaderRowAndFilterLambdaRole.Arn
+      Runtime: "nodejs10.x"
+      Timeout: 60
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref DataS3Bucket
+          CHURN_PREDICTION_THRESHOLD: !Ref ChurnPredictionThreashold
+      Code:
+        S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
+        S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"],  "09-add-header-row-filter-lambda.zip"]]
+
+
+
+  ImportSegmentLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt ImportSegmentLambdaRole.Arn
+      Runtime: "nodejs10.x"
+      Timeout: 60
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref DataS3Bucket
+          APPLICATION_ID: !Ref ApplicationId
+          ROLE_ARN: !GetAtt PinpointImportRole.Arn
+          SEGMENT_NAME: "Predicted To Churn"
+      Code:
+        S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
+        S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"],  "10-import-segment-lambda.zip"]]
+
+
+  ImportSegmentStatusLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt ImportSegmentStatusLambdaRole.Arn
+      Runtime: "nodejs10.x"
+      Timeout: 60
+      Environment:
+        Variables:
+          APPLICATION_ID: !Ref ApplicationId
+      Code:
+        S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
+        S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"],  "11-import-segment-status-lambda.zip"]]
+
+
+  ImportSegmentSuccessLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt ImportSegmentSuccessLambdaRole.Arn
+      Runtime: "nodejs10.x"
+      Timeout: 60
+      Environment:
+        Variables:
+          APPLICATION_ID: !Ref ApplicationId
+      Code:
+        S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
+        S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"],  "12-import-segment-success-lambda.zip"]]
+
+
+  CleanupLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt CleanupLambdaRole.Arn
+      Runtime: "nodejs10.x"
+      Timeout: 60
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref DataS3Bucket
+      Code:
+        S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
+        S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"],  "01-cleanup-lambda.zip"]]
+
+
+
+  DailyChurnListStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    DependsOn: CustomResourceHelper
+    Properties:
+      RoleArn: !GetAtt DailyChurnListStateMachineRole.Arn
+      DefinitionString:
+        !Sub
+          - |-
+            {
+              "StartAt": "CleanStart",
+              "States": {
+                "CleanStart": {
+                  "Type": "Task",
+                  "Resource": "${CleanupArn}",
+                  "Next": "ExportPinpointEndpoints"
+                },
+                "ExportPinpointEndpoints": {
+                  "Type": "Task",
+                  "Resource": "${ExportPinpointEndpointsArn}",
+                  "Next": "ExportWait"
+                },
+                "ExportWait": {
+                  "Type": "Wait",
+                  "Seconds": 30,
+                  "Next": "ExportStatus"
+                },
+                "ExportStatus": {
+                  "Type": "Task",
+                  "Resource": "${ExportStatusArn}",
+                  "Next": "IsExportFinished"
+                },
+                "IsExportFinished": {
+                  "Type": "Choice",
+                  "Default": "ExportWait",
+                  "Choices": [
+                    {
+                      "Variable": "$.ExportJobStatus",
+                      "StringEquals": "FAILED",
+                      "Next": "ExportFailed"
+                    },
+                    {
+                      "Variable": "$.ExportJobStatus",
+                      "StringEquals": "COMPLETED",
+                      "Next": "QueryAugmentStart"
+                    }
+                  ]
+                },
+                "ExportFailed": {
+                  "Type": "Fail",
+                  "Cause": "Pinpoint Export failed",
+                  "Error": "Pinpoint Export failed"
+                },
+                "QueryAugmentStart": {
+                  "Type": "Task",
+                  "Resource": "${QueryAugmentStartArn}",
+                  "Next": "QueryWait"
+                },
+                "QueryWait" : {
+                  "Type": "Wait",
+                  "Seconds": 5,
+                  "Next": "QueryStatus"
+                },
+                "QueryStatus": {
+                  "Type": "Task",
+                  "Resource": "${QueryStatusArn}",
+                  "Next": "IsQueryFinished"
+                },
+                "IsQueryFinished":{
+                  "Type": "Choice",
+                  "Default": "QueryWait",
+                  "Choices": [{
+                      "Variable": "$.Status",
+                      "StringEquals": "FAILED",
+                      "Next": "QueryFailed"
+                  },{
+                      "Variable": "$.Status",
+                      "StringEquals": "SUCCEEDED",
+                      "Next": "RemoveHeaderFromQueryCSV"
+                  }]
+                },
+                "QueryFailed": {
+                  "Type": "Fail",
+                  "Cause": "Athena Query failed",
+                  "Error": "Athena Query failed"
+                },
+                "RemoveHeaderFromQueryCSV": {
+                  "Type": "Task",
+                  "Resource": "${RemoveHeaderFromQueryCSVArn}",
+                  "Next": "SagemakerBatchTransform"
+                },
+                "SagemakerBatchTransform": {
+                  "Type": "Task",
+                  "Resource": "${SagemakerBatchTransformArn}",
+                  "Next": "BatchTransformWait"
+                },
+                "BatchTransformWait": {
+                  "Type": "Wait",
+                  "Seconds": 30,
+                  "Next": "BatchTransformStatus"
+                },
+                "BatchTransformStatus": {
+                  "Type": "Task",
+                  "Resource": "${BatchTransformStatusArn}",
+                  "Next": "IsBatchTransformFinished"
+                },
+                "IsBatchTransformFinished": {
+                  "Type": "Choice",
+                  "Default": "BatchTransformWait",
+                  "Choices": [
+                    {
+                      "Variable": "$.TransformJobStatus",
+                      "StringEquals": "Failed",
+                      "Next": "BatchTransformFailed"
+                    },
+                    {
+                      "Variable": "$.TransformJobStatus",
+                      "StringEquals": "Completed",
+                      "Next": "AddHeaderRowAndFilter"
+                    }
+                  ]
+                },
+                "BatchTransformFailed": {
+                  "Type": "Fail",
+                  "Cause": "SageMaker BatchTransform failed",
+                  "Error": "SageMaker BatchTransform failed"
+                },
+                "AddHeaderRowAndFilter": {
+                  "Type": "Task",
+                  "Resource": "${AddHeaderRowAndFilterLambdaArn}",
+                  "Next": "AreRowsToImport"
+                },
+                "AreRowsToImport": {
+                  "Type": "Choice",
+                  "Default": "ImportLikelyChurnSegment",
+                  "Choices": [
+                    {
+                      "Variable": "$.RowCount",
+                      "NumericEquals": 0,
+                      "Next": "NothingToImport"
+                    }
+                  ]
+                },
+                "NothingToImport" : {
+                  "Type": "Pass",
+                  "End": true
+                },
+                "ImportLikelyChurnSegment": {
+                  "Type": "Task",
+                  "Resource": "${ImportSegmentArn}",
+                  "Next": "ImportSegmentWait"
+                },
+                "ImportSegmentWait": {
+                  "Type": "Wait",
+                  "Seconds": 20,
+                  "Next": "ImportSegmentStatus"
+                },
+                "ImportSegmentStatus": {
+                  "Type": "Task",
+                  "Resource": "${ImportSegmentStatusArn}",
+                  "Next": "IsImportSegmentFinished"
+                },
+                "IsImportSegmentFinished": {
+                  "Type": "Choice",
+                  "Default": "ImportSegmentWait",
+                  "Choices": [
+                    {
+                      "Variable": "$.Status",
+                      "StringEquals": "FAILED",
+                      "Next": "ImportSegmentFailed"
+                    },
+                    {
+                      "Variable": "$.Status",
+                      "StringEquals": "COMPLETED",
+                      "Next": "ImportSegmentSuccess"
+                    }
+                  ]
+                },
+                "ImportSegmentSuccess": {
+                  "Type": "Task",
+                  "Resource": "${ImportSegmentSuccessArn}",
+                  "End": true
+                },
+                "ImportSegmentFailed": {
+                  "Type": "Fail",
+                  "Cause": "Pinpoint Import Segment failed",
+                  "Error": "Pinpoint Import Segment failed"
+                }
+              }
+            }
+          - {ExportPinpointEndpointsArn: !GetAtt ExportPinpointEndpointsLambda.Arn, ExportStatusArn: !GetAtt ExportStatusLambda.Arn, QueryAugmentStartArn: !GetAtt QueryAugmentStartLambda.Arn, QueryStatusArn: !GetAtt QueryStatusLambda.Arn, RemoveHeaderFromQueryCSVArn: !GetAtt RemoveHeaderFromQueryCSV.Arn, SagemakerBatchTransformArn: !GetAtt SagemakerBatchTransformLambda.Arn, BatchTransformStatusArn: !GetAtt BatchTransformStatusLambda.Arn, AddHeaderRowAndFilterLambdaArn: !GetAtt AddHeaderRowAndFilterLambda.Arn, ImportSegmentArn: !GetAtt ImportSegmentLambda.Arn, ImportSegmentStatusArn: !GetAtt ImportSegmentStatusLambda.Arn, ImportSegmentSuccessArn: !GetAtt ImportSegmentSuccessLambda.Arn, CleanupArn: !GetAtt CleanupLambda.Arn}
+
+  DailyChurnListCloudWatchEvent:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Run the DailyChurnListStateMachine Daily"
+      ScheduleExpression: "cron(0 2 * * ? *)"
+      State: "ENABLED"
+      RoleArn: !GetAtt DailyChurnListCloudWatchEventRole.Arn
+      Targets:
+        -
+          Arn: !Ref DailyChurnListStateMachine
+          Id: "DailyChurnListStateMachine"
+          RoleArn: !GetAtt DailyChurnListCloudWatchEventRole.Arn
+
+
+  ExportPinpointEndpointsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              -
+                Effect: "Allow"
+                Action: "iam:PassRole"
+                Resource:
+                  - !GetAtt PinpointExportRole.Arn
+              -
+                Effect: "Allow"
+                Action:
+                  - "mobiletargeting:CreateExportJob"
+                Resource:
+                  - !Sub "arn:aws:mobiletargeting:${AWS::Region}:${AWS::AccountId}:apps/${ApplicationId}/jobs/export"
+                  - !Sub "arn:aws:mobiletargeting:${AWS::Region}:${AWS::AccountId}:apps/${ApplicationId}"
+
+  ExportStatusLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              -
+                Effect: "Allow"
+                Action:
+                  - "mobiletargeting:GetExportJob"
+                Resource:
+                  - !Sub "arn:aws:mobiletargeting:${AWS::Region}:${AWS::AccountId}:apps/${ApplicationId}/jobs/export/*"
+
+  QueryAugmentStartLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              -
+                Effect: "Allow"
+                Action:
+                  - "s3:GetBucketLocation"
+                  - "s3:GetObject"
+                  - "s3:ListBucket"
+                  - "s3:ListBucketMultipartUploads"
+                  - "s3:ListMultipartUploadParts"
+                  - "s3:AbortMultipartUpload"
+                  - "s3:CreateBucket"
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub "arn:aws:s3:::${DataS3Bucket}/*"
+                  - !Sub "arn:aws:s3:::${DataS3Bucket}"
+              -
+                Effect: "Allow"
+                Action:
+                  - "athena:StartQueryExecution"
+                  - "athena:GetNamedQuery"
+                Resource: !Sub "arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/*"
+              -
+                Effect: "Allow"
+                Action:
+                  - "glue:GetDatabase"
+                  - "glue:GetDatabases"
+                  - "glue:GetTable"
+                  - "glue:GetTables"
+                  - "glue:GetPartition"
+                  - "glue:GetPartitions"
+                Resource:
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/pinpoint-events/*"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/pinpoint-events"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+
+  QueryStatusLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              -
+                Effect: "Allow"
+                Action:
+                  - "athena:GetQueryExecution"
+                Resource: !Sub "arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/*"
+
+  RemoveHeaderFromQueryCSVRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              -
+                Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub "arn:aws:s3:::${DataS3Bucket}/*"
+
+  SagemakerBatchTransformLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              -
+                Effect: Allow
+                Action:
+                  - 'sagemaker:CreateTransformJob'
+                Resource:
+                  - 'arn:aws:sagemaker:*:*:transform-job/*'
+
+  BatchTransformStatusLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              -
+                Effect: Allow
+                Action:
+                  - 'sagemaker:DescribeTransformJob'
+                Resource:
+                  - 'arn:aws:sagemaker:*:*:transform-job/*'
+
+  AddHeaderRowAndFilterLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              -
+                Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub "arn:aws:s3:::${DataS3Bucket}/*"
+
+  ImportSegmentLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              -
+                Effect: "Allow"
+                Action:
+                  - "mobiletargeting:GetSegmentVersion"
+                  - "mobiletargeting:GetSegment"
+                  - "mobiletargeting:GetSegments"
+                  - "mobiletargeting:GetSegmentVersions"
+                  - "mobiletargeting:CreateImportJob"
+                Resource:
+                  - !Sub "arn:aws:mobiletargeting:${AWS::Region}:${AWS::AccountId}:apps/${ApplicationId}*"
+                  - !Sub "arn:aws:mobiletargeting:${AWS::Region}:${AWS::AccountId}:apps/${ApplicationId}"
+              -
+                Effect: "Allow"
+                Action: "iam:PassRole"
+                Resource:
+                - !GetAtt PinpointImportRole.Arn
+
+  ImportSegmentStatusLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              -
+                Effect: "Allow"
+                Action:
+                  - "mobiletargeting:GetImportJob"
+                Resource:
+                  - !Sub "arn:aws:mobiletargeting:${AWS::Region}:${AWS::AccountId}:apps/${ApplicationId}/jobs/import/*"
+
+  ImportSegmentSuccessLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              -
+                Effect: "Allow"
+                Action:
+                  - "mobiletargeting:GetSegment"
+                  - "mobiletargeting:TagResource"
+                Resource:
+                  - !Sub "arn:aws:mobiletargeting:${AWS::Region}:${AWS::AccountId}:apps/${ApplicationId}*"
+
+  CleanupLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              -
+                Effect: "Allow"
+                Action:
+                  - "s3:ListBucket"
+                  - "s3:DeleteObject"
+                Resource:
+                  - !Sub "arn:aws:s3:::${DataS3Bucket}/*"
+                  - !Sub "arn:aws:s3:::${DataS3Bucket}"
+
+
+  DailyChurnListStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "states.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action: "lambda:InvokeFunction"
+                Resource:
+                  - !GetAtt ExportPinpointEndpointsLambda.Arn
+                  - !GetAtt ExportStatusLambda.Arn
+                  - !GetAtt QueryAugmentStartLambda.Arn
+                  - !GetAtt QueryStatusLambda.Arn
+                  - !GetAtt RemoveHeaderFromQueryCSV.Arn
+                  - !GetAtt SagemakerBatchTransformLambda.Arn
+                  - !GetAtt BatchTransformStatusLambda.Arn
+                  - !GetAtt AddHeaderRowAndFilterLambda.Arn
+                  - !GetAtt ImportSegmentLambda.Arn
+                  - !GetAtt ImportSegmentStatusLambda.Arn
+                  - !GetAtt ImportSegmentSuccessLambda.Arn
+                  - !GetAtt CleanupLambda.Arn
+
+  PinpointImportRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - pinpoint.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "s3:Get*"
+                  - "s3:List*"
+                Resource:
+                  - !Sub "arn:aws:s3:::${DataS3Bucket}*"
+                  - !Sub "arn:aws:s3:::${DataS3Bucket}"
+
+  PinpointExportRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - pinpoint.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                  - "s3:GetObjectAcl"
+                  - "s3:GetObject"
+                  - "s3:DeleteObjectVersion"
+                  - "s3:GetObjectTagging"
+                  - "s3:DeleteObject"
+                  - "s3:GetObjectVersion"
+                Resource:
+                  - !Sub "arn:aws:s3:::${DataS3Bucket}*"
+                  - !Sub "arn:aws:s3:::${DataS3Bucket}"
+                  - !Sub "arn:aws:s3:::${DataS3Bucket}/"
+                  - !Sub "arn:aws:s3:::${DataS3Bucket}/*"
+              -
+                Effect: "Allow"
+                Action:
+                  - "s3:ListAllMyBuckets"
+                  - "s3:GetBucketLocation"
+                Resource:
+                  - !Sub "arn:aws:s3:::*"
+
+  DailyChurnListCloudWatchEventRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - "events.amazonaws.com"
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action: "states:StartExecution"
+                Resource: !Ref DailyChurnListStateMachine
+
+  CrawlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "glue.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                  - "s3:PutObject"
+                Resource: !Sub "arn:aws:s3:::${DataS3Bucket}*"
+
+  PinpointKinesisStreamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - pinpoint.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "kinesis:PutRecords"
+                  - "kinesis:DescribeStream"
+                Resource: !GetAtt PinpointKinesisStream.Arn
+
+  FirehoseRecordConversionLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+
+  PinpointKinesisFirehoseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - firehose.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action: "glue:GetTableVersions"
+                Resource:
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/pinpoint-events"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+              -
+                Effect: "Allow"
+                Action:
+                  - "s3:AbortMultipartUpload"
+                  - "s3:GetBucketLocation"
+                  - "s3:GetObject"
+                  - "s3:ListBucket"
+                  - "s3:ListBucketMultipartUploads"
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub "arn:aws:s3:::${DataS3Bucket}*"
+                  - !Sub "arn:aws:s3:::${DataS3Bucket}"
+              -
+                Effect: "Allow"
+                Action:
+                  - "lambda:InvokeFunction"
+                  - "lambda:GetFunctionConfiguration"
+                Resource: !GetAtt FirehoseRecordConversionLambda.Arn
+              -
+                Effect: "Allow"
+                Action: "logs:PutLogEvents"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/kinesisfirehose/*:log-stream:*"
+              -
+                Effect: "Allow"
+                Action:
+                  - "kinesis:DescribeStream"
+                  - "kinesis:GetShardIterator"
+                  - "kinesis:GetRecords"
+                Resource: !GetAtt PinpointKinesisStream.Arn
+              -
+                Effect: "Allow"
+                Action: "kms:Decrypt"
+                Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/%SSE_KEY_ID%"
+                Condition:
+                  StringEquals:
+                    kms:ViaService: "kinesis.us-west-2.amazonaws.com"
+                  StringLike:
+                    kms:EncryptionContext:aws:kinesis:arn: !GetAtt PinpointKinesisStream.Arn
+
+  #Deployment Helper Function
+  SetupSampleFiles:
+    Type: Custom::LoadLambda
+    Properties:
+      ServiceToken: !GetAtt CustomResourceHelper.Arn
+      CustomResourceAction: SetupSampleFiles
+
+  CustomResourceHelper:
+    Type: AWS::Lambda::Function
+    DependsOn: Crawler
+    Properties:
+      Environment:
+        Variables:
+          SOLUTION_BUCKET: !Join
+            - "-"
+            - - !FindInMap ["SourceCode", "General", "S3Bucket"]
+              - !Ref AWS::Region
+          SOLUTION_S3KEYPREFIX: !FindInMap ["SourceCode", "General", "KeyPrefix"]
+          S3_DATA_BUCKET: !Ref DataS3Bucket
+          GLUE_CRAWLER_NAME: "pinpoint-event-crawler"
+      Description: Helps set up the IoT Channel Using Amazon Pinpoint solution.
+      Handler: index.handler
+      MemorySize: 256
+      Role: !GetAtt CustomResourceHelperRole.Arn
+      Runtime: nodejs8.10
+      Timeout: 300
+      Code:
+        S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
+        S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"],  "custom-resource-helper.zip"]]
+
+
+  CustomResourceHelperRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                Resource:
+                  - !Join
+                    - ""
+                    - - "arn:aws:s3:::"
+                      - !FindInMap ["SourceCode", "General", "S3Bucket"]
+                      - "-"
+                      - !Ref AWS::Region
+                  - !Join
+                    - ""
+                    - - "arn:aws:s3:::"
+                      - !FindInMap ["SourceCode", "General", "S3Bucket"]
+                      - "-"
+                      - !Ref AWS::Region
+                      - "/*"
+              -
+                Effect: Allow
+                Action:
+                  - "s3:ListBucket"
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub "arn:aws:s3:::${DataS3Bucket}"
+                  - !Sub "arn:aws:s3:::${DataS3Bucket}/*"
+              -
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutDestination
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              -
+                Effect: Allow
+                Action:
+                  - "glue:StartCrawler"
+                Resource:
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:crawler/pinpoint-event-crawler"
