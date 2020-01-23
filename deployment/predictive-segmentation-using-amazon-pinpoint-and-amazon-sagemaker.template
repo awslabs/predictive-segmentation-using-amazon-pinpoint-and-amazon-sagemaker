@@ -38,6 +38,11 @@ Resources:
   DataS3Bucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W51
+            reason: Not public facing.
     Properties:
       PublicAccessBlockConfiguration:
         BlockPublicAcls: True
@@ -55,6 +60,11 @@ Resources:
   NotebookS3Bucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W51
+            reason: Not public facing.
     Properties:
       PublicAccessBlockConfiguration:
         BlockPublicAcls: True
@@ -271,6 +281,11 @@ Resources:
 
   PinpointKinesisStream:
     Type: AWS::Kinesis::Stream
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W49
+            reason: This stream does not contain sensitive data.
     Properties:
       ShardCount: 1
       Tags:
@@ -291,7 +306,7 @@ Resources:
     Properties:
         Handler: index.handler
         Role: !GetAtt FirehoseRecordConversionLambdaRole.Arn
-        Runtime: "nodejs10.x"
+        Runtime: "nodejs12.x"
         Timeout: 60
         Code:
           S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
@@ -450,7 +465,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt ExportPinpointEndpointsLambdaRole.Arn
-      Runtime: "nodejs10.x"
+      Runtime: "nodejs12.x"
       Timeout: 60
       Environment:
         Variables:
@@ -467,7 +482,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt ExportStatusLambdaRole.Arn
-      Runtime: "nodejs10.x"
+      Runtime: "nodejs12.x"
       Timeout: 60
       Environment:
         Variables:
@@ -482,7 +497,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt QueryAugmentStartLambdaRole.Arn
-      Runtime: "nodejs10.x"
+      Runtime: "nodejs12.x"
       Timeout: 60
       Environment:
         Variables:
@@ -498,7 +513,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt QueryStatusLambdaRole.Arn
-      Runtime: "nodejs10.x"
+      Runtime: "nodejs12.x"
       Timeout: 60
       Code:
         S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
@@ -510,7 +525,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt RemoveHeaderFromQueryCSVRole.Arn
-      Runtime: "nodejs10.x"
+      Runtime: "nodejs12.x"
       Timeout: 60
       Environment:
         Variables:
@@ -526,7 +541,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt SagemakerBatchTransformLambdaRole.Arn
-      Runtime: "nodejs10.x"
+      Runtime: "nodejs12.x"
       Timeout: 60
       Environment:
         Variables:
@@ -545,7 +560,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt BatchTransformStatusLambdaRole.Arn
-      Runtime: "nodejs10.x"
+      Runtime: "nodejs12.x"
       Timeout: 60
       Code:
         S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
@@ -557,7 +572,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt AddHeaderRowAndFilterLambdaRole.Arn
-      Runtime: "nodejs10.x"
+      Runtime: "nodejs12.x"
       Timeout: 60
       Environment:
         Variables:
@@ -574,7 +589,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt ImportSegmentLambdaRole.Arn
-      Runtime: "nodejs10.x"
+      Runtime: "nodejs12.x"
       Timeout: 60
       Environment:
         Variables:
@@ -592,7 +607,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt ImportSegmentStatusLambdaRole.Arn
-      Runtime: "nodejs10.x"
+      Runtime: "nodejs12.x"
       Timeout: 60
       Environment:
         Variables:
@@ -607,7 +622,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt ImportSegmentSuccessLambdaRole.Arn
-      Runtime: "nodejs10.x"
+      Runtime: "nodejs12.x"
       Timeout: 60
       Environment:
         Variables:
@@ -622,7 +637,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt CleanupLambdaRole.Arn
-      Runtime: "nodejs10.x"
+      Runtime: "nodejs12.x"
       Timeout: 60
       Environment:
         Variables:
@@ -1581,11 +1596,11 @@ Resources:
           SOLUTION_S3KEYPREFIX: !FindInMap ["SourceCode", "General", "KeyPrefix"]
           S3_DATA_BUCKET: !Ref DataS3Bucket
           GLUE_CRAWLER_NAME: "pinpoint-event-crawler"
-      Description: Helps set up the IoT Channel Using Amazon Pinpoint solution.
+      Description: Helps set up the Predictive Segmentation using Amazon Pinpoint and Amazon SageMaker solution.
       Handler: index.handler
       MemorySize: 256
       Role: !GetAtt CustomResourceHelperRole.Arn
-      Runtime: nodejs8.10
+      Runtime: nodejs12.x
       Timeout: 300
       Code:
         S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
