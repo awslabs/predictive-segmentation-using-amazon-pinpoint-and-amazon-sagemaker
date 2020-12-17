@@ -12,5 +12,10 @@ exports.handler = async (event) => {
         OutputLocation: data.QueryExecution.ResultConfiguration.OutputLocation,
         Status: data.QueryExecution.Status.State
       };
+    })
+    .catch((err) => {
+      console.log('Unexpected Error Caught');
+      console.log(JSON.stringify(err));
+      throw err;
     });
 };

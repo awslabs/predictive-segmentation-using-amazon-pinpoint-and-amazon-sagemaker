@@ -35,7 +35,12 @@ exports.handler = async (event) => {
     });
 
 
-    return Promise.all([promise1, promise2]);
+    return Promise.all([promise1, promise2])
+      .catch((err) => {
+        console.log('Unexpected Error Caught');
+        console.log(JSON.stringify(err));
+        throw err;
+      });
 };
 
 const deleteKeys = function(toDelete) {

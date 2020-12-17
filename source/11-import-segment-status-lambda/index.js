@@ -16,5 +16,10 @@ exports.handler = async (event) => {
       ExternalId: data.ImportJobResponse.Definition.ExternalId,
       Status: data.ImportJobResponse.JobStatus
     };
+  })
+  .catch((err) => {
+    console.log('Unexpected Error Caught');
+    console.log(JSON.stringify(err));
+    throw err;
   });
 };

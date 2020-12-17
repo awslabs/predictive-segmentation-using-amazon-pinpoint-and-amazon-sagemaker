@@ -7,10 +7,16 @@ exports.handler = async (event) => {
 
   return sagemaker.describeTransformJob({TransformJobName: event.TransformJobName}).promise()
     .then((data) => {
+      console.log(JSON.stringify(data));
       return {
         TransformJobStatus: data.TransformJobStatus,
         TransformJobName: event.TransformJobName,
         HeadlessOutputLocation: event.HeadlessOutputLocation
       };
+    })
+    .catch((err) => {
+      console.log('Unexpected Error Caught');
+      console.log(JSON.stringify(err));
+      throw err;
     });
 };

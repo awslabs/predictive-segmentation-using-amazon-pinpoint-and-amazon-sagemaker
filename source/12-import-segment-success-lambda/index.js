@@ -12,5 +12,10 @@ exports.handler = async (event) => {
         }
       }
 
-    }).promise();
+    }).promise()
+    .catch((err) => {
+      console.log('Unexpected Error Caught');
+      console.log(JSON.stringify(err));
+      throw err;
+    });
 };

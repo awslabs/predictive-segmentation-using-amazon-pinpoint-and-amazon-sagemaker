@@ -40,8 +40,14 @@ exports.handler = async (event) => {
 
 
   return p.then((data) => {
+    console.log(JSON.stringify(data));
     return {
       HeadlessOutputLocation: `s3://${process.env.S3_BUCKET}/${headlessOutputLocation}`
     };
+  })
+  .catch((err) => {
+    console.log('Unexpected Error Caught');
+    console.log(JSON.stringify(err));
+    throw err;
   });
 };

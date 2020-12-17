@@ -10,9 +10,15 @@ exports.handler = async (event) => {
       JobId: event.ExportJobId
     }).promise()
     .then((data) => {
+      console.log(JSON.stringify(data));
       return {
         ExportJobStatus: data.ExportJobResponse.JobStatus,
         ExportJobId: data.ExportJobResponse.Id
       };
+    })
+    .catch((err) => {
+      console.log('Unexpected Error Caught');
+      console.log(JSON.stringify(err));
+      throw err;
     });
 };

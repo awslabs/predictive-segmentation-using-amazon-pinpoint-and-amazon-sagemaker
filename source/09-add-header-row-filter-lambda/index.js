@@ -28,9 +28,9 @@ exports.handler = async (event) => {
 
     let rowCount = 0;
 
-    pass.write('Id,Attributes.ChurnScore\n');
+    pass.write('Id,Metrics.' + process.env.METRIC_NAME + '\n');
     rl.on('line', function (line) {
-      if(line.length > 0 && parseFloat(line.split(',')[1]) > parseFloat(process.env.CHURN_PREDICTION_THRESHOLD)) {
+      if(line.length > 0) {
         pass.write(line + '\n');
         rowCount++;
       }
@@ -41,10 +41,16 @@ exports.handler = async (event) => {
     });
 
     return p.then((data) => {
+      console.log(JSON.stringify(data));
       return {
         ImportFile: importFileKey,
         RowCount: rowCount
       };
+    })
+    .catch((err) => {
+      console.log('Unexpected Error Caught');
+      console.log(JSON.stringify(err));
+      throw err;
     });
 
 };

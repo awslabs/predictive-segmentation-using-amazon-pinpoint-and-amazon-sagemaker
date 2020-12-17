@@ -36,10 +36,16 @@ exports.handler = async (event) => {
       }
     }).promise()
     .then((data) => {
+      console.log(JSON.stringify(data));
       return {
         TransformJobName: transformJobName,
         TransformJobArn: data.TransformJobArn,
         HeadlessOutputLocation: event.HeadlessOutputLocation
       };
+    })
+    .catch((err) => {
+      console.log('Unexpected Error Caught');
+      console.log(JSON.stringify(err));
+      throw err;
     });
 };

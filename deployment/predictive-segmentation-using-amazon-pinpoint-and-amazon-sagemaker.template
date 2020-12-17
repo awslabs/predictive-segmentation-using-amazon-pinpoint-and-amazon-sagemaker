@@ -10,11 +10,7 @@ Description: (SO0079) - Predictive Segmentation using Amazon Pinpoint and Amazon
 Parameters:
   ApplicationId:
     Type: String
-    Description: Application ID from Amazon Pinpoint
-  SageMakerModelName:
-    Type: String
-    Default: deployed-xgboost-customer-churn
-    Description: Model name and training job name.
+    Description: Project ID from Amazon Pinpoint
   SageMakerModelTrainInstanceType:
     Type: String
     Default: ml.m4.xlarge
@@ -23,16 +19,84 @@ Parameters:
     Type: String
     Default: ml.m5.large
     Description: GPU Instance type for daily bulk transform jobs.
-  ChurnPredictionThreashold:
-    Type: Number
-    Default: 0.40
-    Description: Predictive Churn Threshold to filter
+  PinpointEventDatabase:
+    Type: String
+    Description: Name of the Digital User Engagement Events Database in Amazon Athena
+    Default: "due_eventdb"
+  DUES3DataLakeName:
+    Type: String
+    Description: Location of the Digital User Engagement Events Database S3 bucket.  Use CloudFormation output paramter 'DUES3DataLakeName'.  Leave empty to skip deploying sample events.
+  DeploySampleEvents:
+    Type: String
+    Description: Indicate whether sample/fictitious event data should be loaded into the Digital User Engagement Events Database S3 bucket for demonstration purposes.
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: "Select the VPC to deploy the SageMaker notebook instance."
+  VPCPubSub:
+    Type: AWS::EC2::Subnet::Id
+    Description: "Select the Subnet Id for the notebook instance."
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: Amazon Pinpoint Project Configuration
+        Parameters:
+          - ApplicationId
+      -
+        Label:
+          default: Digital User Engagement Events Database Solution Configuration
+        Parameters:
+          - PinpointEventDatabase
+          - DUES3DataLakeName
+          - DeploySampleEvents
+      -
+        Label:
+          default: SageMaker Training and Notebook Configuration
+        Parameters:
+          - SageMakerModelTrainInstanceType
+          - SageMakerTransformInstanceType
+          - VPCId
+          - VPCPubSub
+    ParameterLabels:
+      ApplicationId:
+        default: Amazon Pinpoint Project ID
+      PinpointEventDatabase:
+        default: Database Name
+      DUES3DataLakeName:
+        default: S3 Bucket
+      DeploySampleEvents:
+        default: Load Sample Events
+      SageMakerModelTrainInstanceType:
+        default: Model Training Instance Type
+      SageMakerTransformInstanceType:
+        default: Transformation Instance Type
+      VPCId:
+        default: VPC Id
+      VPCPubSub:
+        default: Subnet Id
+
 
 Mappings:
   SourceCode:
     General:
       S3Bucket: "%%BUCKET_NAME%%"
       KeyPrefix: "%%SOLUTION_NAME%%/%%VERSION%%"
+    Runtime:
+      Nodejs: "nodejs12.x"
+  Variables:
+    General:
+      MetricName: "ChurnPrediction"
+      SegmentName: "Predicted to Churn"
+      ChurnPredictionThreashold: "0.40"
+      SageMakerModelName: "deployed-xgboost-customer-churn"
+
+Conditions:
+  LoadSampleEvents: !Equals ['Yes', !Ref DeploySampleEvents]
 
 Resources:
   DataS3Bucket:
@@ -57,6 +121,25 @@ Resources:
         DestinationBucketName: !Ref LogBucket
         LogFilePrefix: predictive-segmentation-data/
 
+  DataS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DataS3Bucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowSSLRequestsOnly
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Sub "arn:aws:s3:::${DataS3Bucket}/*"
+              - !Sub "arn:aws:s3:::${DataS3Bucket}"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+
   NotebookS3Bucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
@@ -78,6 +161,24 @@ Resources:
       LoggingConfiguration:
         DestinationBucketName: !Ref LogBucket
         LogFilePrefix: notebook-data-bucket/
+
+  NotebookS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref NotebookS3Bucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Sid: AllowSSLRequestsOnly
+          Effect: Deny
+          Principal: "*"
+          Action: "s3:*"
+          Resource:
+            - !Sub "arn:aws:s3:::${NotebookS3Bucket}/*"
+            - !Sub "arn:aws:s3:::${NotebookS3Bucket}"
+          Condition:
+            Bool:
+              "aws:SecureTransport": "false"
 
   LogBucket:
     Type: AWS::S3::Bucket
@@ -120,15 +221,92 @@ Resources:
           Condition:
             StringEquals:
               "s3:x-amz-acl": "bucket-owner-full-control"
+        - Sid: LogBucketAllowSSLRequestsOnly
+          Effect: Deny
+          Principal: "*"
+          Action: "s3:*"
+          Resource:
+            - !Sub "arn:aws:s3:::${LogBucket}/*"
+            - !Sub "arn:aws:s3:::${LogBucket}"
+          Condition:
+            Bool:
+              "aws:SecureTransport": "false"
+
+
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcId: !Ref VPCId
+      PolicyDocument: !Sub
+        |
+          {
+            "Version":"2012-10-17",
+            "Statement":[
+              {
+                "Effect":"Allow",
+                "Principal": "*",
+                "Action": "*",
+                "Resource":[
+                  "arn:aws:s3:::${NotebookS3Bucket}/*",
+                  "arn:aws:s3:::${NotebookS3Bucket}",
+                  "arn:aws:s3:::churnv2-${AWS::Region}/*",
+                  "arn:aws:s3:::churnv2-${AWS::Region}"
+                ]
+              }
+            ]
+          }
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          -
+            id: "W5"
+            reason: "Allow notebook users to access the internet from the notebook. Needed to get demo data"
+          -
+            id: "W36"
+            reason: "Security Group has a description that includes description of egress rule"
+    Properties:
+      GroupDescription: "Notebook instance security group. By default allows connection to the internet"
+      VpcId: !Ref VPCId
+      SecurityGroupEgress:
+         -
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "0.0.0.0/0"
+
+  NotebookInstanceVolumeEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: "KMS Key for encrypting sagemaker notebook instance volume"
+      Enabled: true
+      EnableKeyRotation: true
+      PendingWindowInDays: 7
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: "default-key-policy"
+        Statement:
+          -
+            Sid: "Enable IAM User Permissions"
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
 
   BasicNotebookInstance:
     Type: 'AWS::SageMaker::NotebookInstance'
     Properties:
       InstanceType: ml.t2.medium
       NotebookInstanceName: PredictiveChurnNotebookInstance
-      RoleArn: !GetAtt
-        - NotebookInstanceExecutionRole
-        - Arn
+      SubnetId: !Ref VPCPubSub
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      KmsKeyId: !Ref NotebookInstanceVolumeEncryptionKey
+      RoleArn: !GetAtt NotebookInstanceExecutionRole.Arn
       LifecycleConfigName: !GetAtt
         - BasicNotebookInstanceLifecycleConfig
         - NotebookInstanceLifecycleConfigName
@@ -151,7 +329,7 @@ Resources:
                 - !Join
                   - ''
                   - - sed -i 's/deployed-xgboost-customer-churn/
-                    - !Ref SageMakerModelName
+                    - !FindInMap ["Variables", "General", "SageMakerModelName"]
                     - /g' xgboost_customer_churn.ipynb
                 - !Join
                   - ''
@@ -279,185 +457,82 @@ Resources:
         - !Ref NotebookInstanceExecutionRole
 
 
-  PinpointKinesisStream:
-    Type: AWS::Kinesis::Stream
-    Metadata:
-      cfn_nag:
-        rules_to_suppress:
-          - id: W49
-            reason: This stream does not contain sensitive data.
-    Properties:
-      ShardCount: 1
-      Tags:
-        -
-          Key: "Name"
-          Value: "Pinpoint Event Firehose Stream Destination"
-
-
-  PinpointEngagingApplicationStream:
-    Type: AWS::Pinpoint::EventStream
-    Properties:
-      ApplicationId: !Ref ApplicationId
-      DestinationStreamArn: !GetAtt PinpointKinesisStream.Arn
-      RoleArn: !GetAtt PinpointKinesisStreamRole.Arn
-
-  FirehoseRecordConversionLambda:
-    Type: AWS::Lambda::Function
-    Properties:
-        Handler: index.handler
-        Role: !GetAtt FirehoseRecordConversionLambdaRole.Arn
-        Runtime: "nodejs12.x"
-        Timeout: 60
-        Code:
-          S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
-          S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"],  "firehose-record-conversion-lambda.zip"]]
-
-
-
-  PinpointEventFirehose:
-    Type: AWS::KinesisFirehose::DeliveryStream
-    Properties:
-      DeliveryStreamType: "KinesisStreamAsSource"
-      KinesisStreamSourceConfiguration:
-        KinesisStreamARN: !GetAtt PinpointKinesisStream.Arn
-        RoleARN: !GetAtt PinpointKinesisFirehoseRole.Arn
-      ExtendedS3DestinationConfiguration:
-        BucketARN: !Sub "arn:aws:s3:::${DataS3Bucket}"
-        BufferingHints:
-          IntervalInSeconds: 300
-          SizeInMBs: 5
-        CompressionFormat: "UNCOMPRESSED"
-        Prefix: "events/"
-        RoleARN: !GetAtt PinpointKinesisFirehoseRole.Arn
-        ProcessingConfiguration:
-          Enabled: TRUE
-          Processors:
-            -
-              Parameters:
-                -
-                  ParameterName: "LambdaArn"
-                  ParameterValue: !GetAtt FirehoseRecordConversionLambda.Arn
-                -
-                  ParameterName: "BufferIntervalInSeconds"
-                  ParameterValue: 60
-                -
-                  ParameterName: "BufferSizeInMBs"
-                  ParameterValue: 3
-                -
-                  ParameterName: "NumberOfRetries"
-                  ParameterValue: 3
-                -
-                  ParameterName: "RoleArn"
-                  ParameterValue: !GetAtt PinpointKinesisFirehoseRole.Arn
-              Type: "Lambda"
-
-  PinpointEventDatabase:
-    Type: AWS::Glue::Database
-    Properties:
-      CatalogId: !Ref AWS::AccountId
-      DatabaseInput:
-        Name: "pinpoint-events"
-        Description: "Pinpoint Streaming Event Database"
-
-  Crawler:
-    Type: AWS::Glue::Crawler
-    Properties:
-      Role: !GetAtt CrawlerRole.Arn
-      Description: "Crawler of Pinpoint Events streaming into S3 from Kinesis"
-      Schedule:
-        ScheduleExpression: "cron(0 1 * * ? *)"
-      DatabaseName: !Ref PinpointEventDatabase
-      Targets:
-        S3Targets:
-          -
-            Path: !Sub "s3://${DataS3Bucket}"
-            Exclusions:
-              - 'sagemaker-bulk-transform-result/**'
-              - 'sagemaker-bulk-transform/**'
-      Name: pinpoint-event-crawler
-      Configuration: "{\"Version\":1.0,\"CrawlerOutput\":{\"Partitions\":{\"AddOrUpdateBehavior\":\"InheritFromTable\"},\"Tables\":{\"AddOrUpdateBehavior\":\"MergeNewColumns\"}}}"
-
-
   AugmentEndpointNamedQuery:
     Type: AWS::Athena::NamedQuery
     Properties:
       Database: !Ref PinpointEventDatabase
       Description: "Query to select customers and churn features for SageMaker consumption."
       QueryString: |
-            WITH dataset AS (
-              SELECT
-                facets.email_channel.mail_event.mail.destination as emailaddresses,
-                event_type,
-                arrival_timestamp
-              FROM "events"
-              WHERE
-                (event_type = '_email.delivered' AND from_unixtime(arrival_timestamp) > date_add('month', -12, date('2019-10-25')))
-                  OR
-                (event_type IN ('_email.open', '_email.click') AND from_unixtime(arrival_timestamp) > date_add('month', -12, date('2019-10-25')))
-                ),
-            delivered AS (
-              SELECT
-                emailaddresses,
-               'DELIVERED' AS event_type,
-                arrival_timestamp
-              FROM dataset
-              WHERE event_type = '_email.delivered'
-            ),
+            WITH delivered AS (
+              SELECT MAX(a.event_timestamp) max_time, MAX(e.address) address
+              FROM endpoint_export e
+              INNER JOIN email_delivered a ON e.id = a.endpoint_id
+              WHERE a.ingest_timestamp > date_add('month', -12, date('2019-10-25'))
+              GROUP BY e.id
+             ),
             engaged AS (
-              SELECT
-                emailaddresses,
-                'ENGAGEMENT' AS event_type,
-                arrival_timestamp
-              FROM dataset
-              WHERE event_type IN ('_email.open', '_email.click')
-            ),
-            joined AS (
-              SELECT
-                emailaddresses,
-                arrival_timestamp AS delivered_timestamp,
-                null AS engagement_timestamp
-              FROM delivered
-              UNION
-              SELECT
-                emailaddresses,
-                null AS delivered_timestamp,
-                arrival_timestamp AS engagement_timestamp
-              FROM engaged
-            ),
-            flatten AS (
-              SELECT emailaddress, delivered_timestamp, engagement_timestamp
-              FROM joined
-              CROSS JOIN UNNEST(emailaddresses) as t(emailaddress)
-            ),
-            min_max AS (
-              SELECT
-                emailaddress,
-                MAX(delivered_timestamp) AS max_delivered_timestamp,
-                MIN(delivered_timestamp) AS min_delivered_timestamp,
-                MAX(engagement_timestamp) AS last_engagement,
-                COUNT(delivered_timestamp) AS num_delivered
-              FROM flatten
-              GROUP BY emailaddress
-            )
+              SELECT MAX(event_timestamp) max_time, MAX(e.address) address
+              FROM endpoint_export e
+              INNER JOIN email_open a ON e.id = a.endpoint_id
+              WHERE a.ingest_timestamp > date_add('month', -12, date('2019-10-25'))
+              GROUP BY e.id
+              UNION ALL
+              SELECT MAX(event_timestamp) max_time, MAX(e.address) address
+              FROM endpoint_export e
+              INNER JOIN email_click a ON e.id = a.endpoint_id
+              WHERE a.ingest_timestamp > date_add('month', -12, date('2019-10-25'))
+              GROUP BY e.id
+              )
+
             SELECT
-              MAX(b.EndpointID),
-              a.address AS EmailAddress,
-              MAX(b."account length"),
-              MAX(b."PlanOptionA"),
-              MAX(b."PlanOptionB"),
-              MAX(b."PlanOptionC"),
-              MAX(b."UsageWeekdays"),
-              MAX(b."UsageWeekends"),
-              MAX(b."SharedWithFriend"),
-              MAX(CASE WHEN from_unixtime(c.max_delivered_timestamp) < date_add('month', -6, date('2019-10-25')) THEN 0 WHEN from_unixtime(c.max_delivered_timestamp) < date_add('month', -1, date('2019-10-25')) THEN 1 ELSE 2 END),
-              MAX(CASE WHEN from_unixtime(c.last_engagement) < date_add('month', -6, date('2019-10-25')) THEN 0 WHEN from_unixtime(c.last_engagement) < date_add('month', -1, date('2019-10-25')) THEN 1 ELSE 2 END)
-            FROM endpoint_exports a
-            INNER JOIN customers b
-              ON a.address = b.emailaddress
-            LEFT JOIN min_max c
-              ON a.address = c.emailaddress
-            WHERE a.channeltype = 'EMAIL' AND a.endpointstatus = 'ACTIVE' AND a.optout = 'NONE'
-            GROUP BY a.address
+              a.id,
+              MAX(a.address) AS EmailAddress,
+              MAX(a.attributes['accountlength'][1]),
+              MAX(a.attributes['planoptiona'][1]),
+              MAX(a.attributes['planoptionb'][1]),
+              MAX(a.attributes['planoptionc'][1]),
+              MAX(a.attributes['usageweekdays'][1]),
+              MAX(a.attributes['usageweekends'][1]),
+              MAX(a.attributes['sharedwithfriend'][1]),
+              MAX(CASE WHEN delivered.max_time < date_add('month', -6, date('2019-10-25'))  THEN 0
+                  WHEN delivered.max_time < date_add('month', -1, date('2019-10-25')) THEN 1
+                  ELSE 2 END),
+              MAX(CASE WHEN engaged.max_time < date_add('month', -6, date('2019-10-25')) THEN 0
+                  WHEN engaged.max_time < date_add('month', -1, date('2019-10-25')) THEN 1
+                  ELSE 2 END)
+
+            FROM endpoint_export a
+            LEFT JOIN delivered ON a.address = delivered.address
+            LEFT JOIN engaged ON a.address = engaged.address
+            WHERE a.channeltype = 'EMAIL' AND a.endpointstatus = 'ACTIVE'
+            GROUP BY a.id
+
+  AthenaCreateTableEndpointExportsNamedQuery:
+    Type: AWS::Athena::NamedQuery
+    DeletionPolicy: Delete
+    Properties:
+      Database: !Ref PinpointEventDatabase
+      Description: "Create the Endpoint Exports table from S3."
+      QueryString:
+        !Sub
+          |
+            CREATE EXTERNAL TABLE IF NOT EXISTS `${PinpointEventDatabase}`.endpoint_export (
+              id string,
+              channeltype string,
+              address string,
+              endpointstatus string,
+              optout string,
+              effectivedate string,
+              attributes map<string,array<string>>,
+              metrics map<string,array<string>>,
+              user struct<userid:string, userattributes:map<string,array<string>>>
+            )
+            ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe'
+            WITH SERDEPROPERTIES (
+              'serialization.format' = '1'
+            ) LOCATION 's3://${DataS3Bucket}/endpoint_exports/'
+            TBLPROPERTIES ('has_encrypted_data'='false');
+
 
 
   ExportPinpointEndpointsLambda:
@@ -465,7 +540,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt ExportPinpointEndpointsLambdaRole.Arn
-      Runtime: "nodejs12.x"
+      Runtime: !FindInMap ["SourceCode", "Runtime", "Nodejs"]
       Timeout: 60
       Environment:
         Variables:
@@ -482,7 +557,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt ExportStatusLambdaRole.Arn
-      Runtime: "nodejs12.x"
+      Runtime: !FindInMap ["SourceCode", "Runtime", "Nodejs"]
       Timeout: 60
       Environment:
         Variables:
@@ -497,7 +572,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt QueryAugmentStartLambdaRole.Arn
-      Runtime: "nodejs12.x"
+      Runtime: !FindInMap ["SourceCode", "Runtime", "Nodejs"]
       Timeout: 60
       Environment:
         Variables:
@@ -513,7 +588,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt QueryStatusLambdaRole.Arn
-      Runtime: "nodejs12.x"
+      Runtime: !FindInMap ["SourceCode", "Runtime", "Nodejs"]
       Timeout: 60
       Code:
         S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
@@ -525,7 +600,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt RemoveHeaderFromQueryCSVRole.Arn
-      Runtime: "nodejs12.x"
+      Runtime: !FindInMap ["SourceCode", "Runtime", "Nodejs"]
       Timeout: 60
       Environment:
         Variables:
@@ -541,11 +616,11 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt SagemakerBatchTransformLambdaRole.Arn
-      Runtime: "nodejs12.x"
+      Runtime: !FindInMap ["SourceCode", "Runtime", "Nodejs"]
       Timeout: 60
       Environment:
         Variables:
-          MODEL_NAME: !Ref SageMakerModelName
+          MODEL_NAME: !FindInMap ["Variables", "General", "SageMakerModelName"]
           S3_BUCKET: !Ref DataS3Bucket
           TRANSFORM_INSTANCE: !Ref SageMakerTransformInstanceType
       Code:
@@ -560,7 +635,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt BatchTransformStatusLambdaRole.Arn
-      Runtime: "nodejs12.x"
+      Runtime: !FindInMap ["SourceCode", "Runtime", "Nodejs"]
       Timeout: 60
       Code:
         S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
@@ -572,12 +647,12 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt AddHeaderRowAndFilterLambdaRole.Arn
-      Runtime: "nodejs12.x"
+      Runtime: !FindInMap ["SourceCode", "Runtime", "Nodejs"]
       Timeout: 60
       Environment:
         Variables:
           S3_BUCKET: !Ref DataS3Bucket
-          CHURN_PREDICTION_THRESHOLD: !Ref ChurnPredictionThreashold
+          METRIC_NAME: !FindInMap ["Variables", "General", "MetricName"]
       Code:
         S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
         S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"],  "09-add-header-row-filter-lambda.zip"]]
@@ -589,14 +664,13 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt ImportSegmentLambdaRole.Arn
-      Runtime: "nodejs12.x"
+      Runtime: !FindInMap ["SourceCode", "Runtime", "Nodejs"]
       Timeout: 60
       Environment:
         Variables:
           S3_BUCKET: !Ref DataS3Bucket
           APPLICATION_ID: !Ref ApplicationId
           ROLE_ARN: !GetAtt PinpointImportRole.Arn
-          SEGMENT_NAME: "Predicted To Churn"
       Code:
         S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
         S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"],  "10-import-segment-lambda.zip"]]
@@ -607,7 +681,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt ImportSegmentStatusLambdaRole.Arn
-      Runtime: "nodejs12.x"
+      Runtime: !FindInMap ["SourceCode", "Runtime", "Nodejs"]
       Timeout: 60
       Environment:
         Variables:
@@ -622,7 +696,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt ImportSegmentSuccessLambdaRole.Arn
-      Runtime: "nodejs12.x"
+      Runtime: !FindInMap ["SourceCode", "Runtime", "Nodejs"]
       Timeout: 60
       Environment:
         Variables:
@@ -637,7 +711,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt CleanupLambdaRole.Arn
-      Runtime: "nodejs12.x"
+      Runtime: !FindInMap ["SourceCode", "Runtime", "Nodejs"]
       Timeout: 60
       Environment:
         Variables:
@@ -965,6 +1039,8 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:s3:::${DataS3Bucket}/*"
                   - !Sub "arn:aws:s3:::${DataS3Bucket}"
+                  - !Sub "arn:aws:s3:::${DUES3DataLakeName}/*"
+                  - !Sub "arn:aws:s3:::${DUES3DataLakeName}"
               -
                 Effect: "Allow"
                 Action:
@@ -981,8 +1057,8 @@ Resources:
                   - "glue:GetPartition"
                   - "glue:GetPartitions"
                 Resource:
-                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/pinpoint-events/*"
-                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/pinpoint-events"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${PinpointEventDatabase}/*"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${PinpointEventDatabase}"
                   - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
 
   QueryStatusLambdaRole:
@@ -1299,6 +1375,11 @@ Resources:
 
   DailyChurnListStateMachineRole:
     Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W76
+            reason: Complex Role that is used for StateMachine to invoke many other lambdas
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -1311,8 +1392,6 @@ Resources:
             Action:
               - "sts:AssumeRole"
       Path: "/"
-      ManagedPolicyArns:
-        - "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"
       Policies:
         -
           PolicyName: "root"
@@ -1358,8 +1437,8 @@ Resources:
               -
                 Effect: "Allow"
                 Action:
-                  - "s3:Get*"
-                  - "s3:List*"
+                  - "s3:GetObject"
+                  - "s3:ListBucket"
                 Resource:
                   - !Sub "arn:aws:s3:::${DataS3Bucket}*"
                   - !Sub "arn:aws:s3:::${DataS3Bucket}"
@@ -1430,162 +1509,16 @@ Resources:
                 Action: "states:StartExecution"
                 Resource: !Ref DailyChurnListStateMachine
 
-  CrawlerRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          -
-            Effect: "Allow"
-            Principal:
-              Service:
-                - "glue.amazonaws.com"
-            Action:
-              - "sts:AssumeRole"
-      Path: "/"
-      ManagedPolicyArns:
-        - "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"
-      Policies:
-        -
-          PolicyName: "root"
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              -
-                Effect: "Allow"
-                Action:
-                  - "s3:GetObject"
-                  - "s3:PutObject"
-                Resource: !Sub "arn:aws:s3:::${DataS3Bucket}*"
-
-  PinpointKinesisStreamRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - pinpoint.amazonaws.com
-            Action:
-              - 'sts:AssumeRole'
-      Path: "/"
-      Policies:
-        -
-          PolicyName: "root"
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              -
-                Effect: "Allow"
-                Action:
-                  - "kinesis:PutRecords"
-                  - "kinesis:DescribeStream"
-                Resource: !GetAtt PinpointKinesisStream.Arn
-
-  FirehoseRecordConversionLambdaRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - lambda.amazonaws.com
-            Action:
-              - 'sts:AssumeRole'
-      Path: "/"
-      Policies:
-        -
-          PolicyName: "root"
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              -
-                Effect: "Allow"
-                Action:
-                  - "logs:CreateLogGroup"
-                  - "logs:CreateLogStream"
-                  - "logs:PutLogEvents"
-                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
-
-  PinpointKinesisFirehoseRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - firehose.amazonaws.com
-            Action:
-              - 'sts:AssumeRole'
-      Path: "/"
-      Policies:
-        -
-          PolicyName: "root"
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              -
-                Effect: "Allow"
-                Action: "glue:GetTableVersions"
-                Resource:
-                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/pinpoint-events"
-                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
-              -
-                Effect: "Allow"
-                Action:
-                  - "s3:AbortMultipartUpload"
-                  - "s3:GetBucketLocation"
-                  - "s3:GetObject"
-                  - "s3:ListBucket"
-                  - "s3:ListBucketMultipartUploads"
-                  - "s3:PutObject"
-                Resource:
-                  - !Sub "arn:aws:s3:::${DataS3Bucket}*"
-                  - !Sub "arn:aws:s3:::${DataS3Bucket}"
-              -
-                Effect: "Allow"
-                Action:
-                  - "lambda:InvokeFunction"
-                  - "lambda:GetFunctionConfiguration"
-                Resource: !GetAtt FirehoseRecordConversionLambda.Arn
-              -
-                Effect: "Allow"
-                Action: "logs:PutLogEvents"
-                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/kinesisfirehose/*:log-stream:*"
-              -
-                Effect: "Allow"
-                Action:
-                  - "kinesis:DescribeStream"
-                  - "kinesis:GetShardIterator"
-                  - "kinesis:GetRecords"
-                Resource: !GetAtt PinpointKinesisStream.Arn
-              -
-                Effect: "Allow"
-                Action: "kms:Decrypt"
-                Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/%SSE_KEY_ID%"
-                Condition:
-                  StringEquals:
-                    kms:ViaService: "kinesis.us-west-2.amazonaws.com"
-                  StringLike:
-                    kms:EncryptionContext:aws:kinesis:arn: !GetAtt PinpointKinesisStream.Arn
-
   #Deployment Helper Function
   SetupSampleFiles:
     Type: Custom::LoadLambda
+    DependsOn: OptionalPolicyForSampleEvents
     Properties:
       ServiceToken: !GetAtt CustomResourceHelper.Arn
       CustomResourceAction: SetupSampleFiles
 
   CustomResourceHelper:
     Type: AWS::Lambda::Function
-    DependsOn: Crawler
     Properties:
       Environment:
         Variables:
@@ -1595,12 +1528,18 @@ Resources:
               - !Ref AWS::Region
           SOLUTION_S3KEYPREFIX: !FindInMap ["SourceCode", "General", "KeyPrefix"]
           S3_DATA_BUCKET: !Ref DataS3Bucket
-          GLUE_CRAWLER_NAME: "pinpoint-event-crawler"
+          METRIC_NAME: !FindInMap ["Variables", "General", "MetricName"]
+          CHURN_PREDICTION_THRESHOLD: !FindInMap ["Variables", "General", "ChurnPredictionThreashold"]
+          SEGMENT_NAME: !FindInMap ["Variables", "General", "SegmentName"]
+          EXPORT_NAMED_QUERY: !Ref AthenaCreateTableEndpointExportsNamedQuery
+          APPLICATION_ID: !Ref ApplicationId
+          DUE_DB_S3_BUCKET: !Ref DUES3DataLakeName
+          LOAD_SAMPLE_EVENTS: !Ref DeploySampleEvents
       Description: Helps set up the Predictive Segmentation using Amazon Pinpoint and Amazon SageMaker solution.
       Handler: index.handler
       MemorySize: 256
       Role: !GetAtt CustomResourceHelperRole.Arn
-      Runtime: nodejs12.x
+      Runtime: !FindInMap ["SourceCode", "Runtime", "Nodejs"]
       Timeout: 300
       Code:
         S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region" ]]
@@ -1646,7 +1585,12 @@ Resources:
               -
                 Effect: Allow
                 Action:
+                  - "s3:GetBucketLocation"
+                  - "s3:GetObject"
                   - "s3:ListBucket"
+                  - "s3:ListBucketMultipartUploads"
+                  - "s3:ListMultipartUploadParts"
+                  - "s3:AbortMultipartUpload"
                   - "s3:PutObject"
                 Resource:
                   - !Sub "arn:aws:s3:::${DataS3Bucket}"
@@ -1661,8 +1605,55 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
               -
-                Effect: Allow
+                Effect: "Allow"
                 Action:
-                  - "glue:StartCrawler"
+                  - "athena:StartQueryExecution"
+                  - "athena:GetNamedQuery"
+                  - "athena:BatchGetNamedQuery"
+                  - "athena:GetQueryExecution"
+                Resource: !Sub "arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/*"
+              -
+                Effect: "Allow"
+                Action:
+                  - "glue:GetDatabase"
+                  - "glue:GetDatabases"
+                  - "glue:GetTable"
+                  - "glue:GetTables"
+                  - "glue:GetPartition"
+                  - "glue:GetPartitions"
+                  - "glue:CreateTable"
                 Resource:
-                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:crawler/pinpoint-event-crawler"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${PinpointEventDatabase}/*"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${PinpointEventDatabase}"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+              -
+                Effect: "Allow"
+                Action:
+                  - "mobiletargeting:CreateSegment"
+                Resource:
+                  - !Sub "arn:aws:mobiletargeting:${AWS::Region}:${AWS::AccountId}:apps/${ApplicationId}"
+
+  OptionalPolicyForSampleEvents:
+    Type: AWS::IAM::Policy
+    Condition: LoadSampleEvents
+    Properties:
+      PolicyName: PredSegmentDeploySampleEvents
+      Roles:
+        - !Ref CustomResourceHelperRole
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Action:
+              - "s3:GetObject"
+              - "s3:PutObject"
+            Resource:
+              - !Sub "arn:aws:s3:::${DUES3DataLakeName}/*"
+
+
+
+Outputs:
+  BasicNotebookInstanceName:
+    Description: Amazon SageMaker Notebook Instance Name
+    Value: !GetAtt BasicNotebookInstance.NotebookInstanceName

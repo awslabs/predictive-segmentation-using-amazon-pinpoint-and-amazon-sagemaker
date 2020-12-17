@@ -130,11 +130,6 @@ cd $source_dir/12-import-segment-success-lambda
 npm run build
 cp ./dist/12-import-segment-success-lambda.zip $build_dist_dir/12-import-segment-success-lambda.zip
 
-echo "Building Function firehose-record-conversion-lambda"
-cd $source_dir/firehose-record-conversion-lambda
-npm run build
-cp ./dist/firehose-record-conversion-lambda.zip $build_dist_dir/firehose-record-conversion-lambda.zip
-
 echo "Building Function custom-resource-helper"
 cd $source_dir/custom-resource-helper
 npm run build
@@ -148,8 +143,8 @@ echo "--------------------------------------------------------------------------
 echo "Move S3 Sample Notebook and Data Files"
 cp $source_dir/notebooks/xgboost_customer_churn.ipynb $build_dist_dir/
 cp $source_dir/sample_data/ChurnSampleData.csv $build_dist_dir/
-cp $source_dir/sample_data/sample_pinpoint_events.json $build_dist_dir/
-cp $source_dir/sample_data/sample_pinpoint_export.json $build_dist_dir/
+cp $source_dir/sample_data/sample_pinpoint_events.parquet $build_dist_dir/
+cp $source_dir/sample_data/SampleImport.csv $template_dist_dir/
 
 # Finish Up
 echo "Completed building distribution"

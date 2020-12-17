@@ -21,5 +21,10 @@ exports.handler = async (event) => {
       return {
         ExportJobId: data.ExportJobResponse.Id
       };
+    })
+    .catch((err) => {
+      console.log('Unexpected Error Caught');
+      console.log(JSON.stringify(err));
+      throw err;
     });
 };
